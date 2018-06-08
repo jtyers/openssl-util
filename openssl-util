@@ -1,0 +1,646 @@
+#!/bin/sh
+
+# MIT License
+# 
+# Copyright (c) 2018 Jonny Tyers
+# 
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+# 
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+# 
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+# 
+
+# openssl utility script
+#
+# operations:
+# --create-root			create a root CA (self-signed)
+# --create-intermediate		create an intermediate CA
+# --create-certificate		create a certificate signed by an intermediate CA
+#
+# options:
+# --root-path			path to root CA folder (either to create or to
+# 				link to intermediate CA)
+# --intermediate-path		path to intermediate CA folder (either to create or to
+# 				link to certificate)
+# --certificate-type		type of cert to create when --create-certificate is used;
+# 				can be either "user" or "server" (defaults to server)
+# --passphrases			type of passphrases to generate 
+set -eu
+
+# Example usage: echo -e ${COL_GRAY}This is some text${COL_NONE}
+COL_BLACK="\033[0:30m"
+COL_GRAY="\033[1;30m"
+COL_RED="\033[0;31m"
+COL_LRED="\033[1;31m"
+COL_GREEN="\033[0;32m"
+COL_LGREEN="\033[1;32m"
+COL_BROWN="\033[0;33m"
+COL_YELLOW="\033[1;33m"
+COL_DBLUE="\033[0;34m"
+COL_BLUE="\033[1;34m"
+COL_PURPLE="\033[0;35m"
+COL_LPURPLE="\033[1;35m"
+COL_CYAN="\033[0;36m"
+COL_LCYAN="\033[1;36m"
+COL_LGRAY="\033[0;37m" # Already declared as 0;0m
+COL_WHITE="\033[1;37m"
+COL_NONE="\033[0m" # No colours
+
+die() {
+	echo -e "${COL_LRED}""$@""${COL_NONE}" >&2
+	exit 1
+}
+
+dn=`find-repo`
+usage="usage: openssl-util [--create-root|--create-intermediate|--create-certificate] --root-path --intermediate-path --certificate-type <user|server>"
+
+# generates a long passphrase from /dev/urandom
+# usage: generatePassphrase <ca root> [<ca/cert name>]
+generatePassphrase() {
+	local caRoot="$1"
+	local caName="${2:-`deriveName $caRoot`}"
+
+	dd status=none if=/dev/urandom bs=128 count=1 \
+		| base64 \
+		| tr -d '\n' \
+		| sed -e 's/=*$//' \
+		> $caRoot/private/${caName}.passphrase
+	chmod 400 $caRoot/private/${caName}.passphrase
+
+	echo -e "${COL_BROWN}passphrase for ${caName} created at ${COL_YELLOW}$caRoot/private/${caName}.passphrase${COL_NONE}"
+}
+
+# derive the name of a CA based on its folder name
+# usage: deriveName <CA path>
+deriveName() {
+	basename "$1"
+}
+
+# function that calls openssl, but shows the user what we're doing first
+OPENSSL=`which openssl`
+openssl() {
+	echo -e "${COL_WHITE}+ openssl" "$@" "${COL_GRAY}"
+	$OPENSSL "$@"	
+	echo -e "${COL_NONE}"
+}
+
+# create a private key for the given CA
+# usage: createPrivateKey <ca folder> <ca name> <key length> [<new name>]
+createPrivateKey() {
+	local caRoot="$1"
+	local keyLen="$2"
+	local caName="${3:-`deriveName $caRoot`}"
+
+	[ -d $caRoot ] || die "not a directory: $caRoot"
+	#local caName=`deriveName $caRoot`
+
+	blatMaybe $caRoot/private/${caName}.key.pem
+
+	mkdir -p $caRoot/private
+	chmod 700 $caRoot/private
+
+	generatePassphrase $caRoot ${caName}
+
+	openssl genrsa -aes256 \
+		-passout file:$caRoot/private/${caName}.passphrase \
+		-out $caRoot/private/${caName}.key.pem $keyLen
+
+	chmod 400 $caRoot/private/${caName}.key.pem
+}
+
+# simply verifies that we can decrypt the given private key with the given passphrase
+verifyPrivateKey() {
+	local caRoot="$1"
+
+	[ -d $caRoot ] || die "not a directory: $caRoot"
+	local caName=`deriveName $caRoot`
+
+	openssl pkey -in ${caRoot}/private/${caName}.key.pem \
+		-passin file:${caRoot}/private/${caName}.passphrase \
+		-noout
+}
+
+# create a self-signed root cert
+# usage: createSelfSignedRootCert <ca folder> <ca name>
+createSelfSignedRootCert() {
+	local caRoot="$1"
+
+	[ -d $caRoot ] || die "not a directory: $caRoot"
+	local caName=`deriveName $caRoot`
+
+	blatMaybe $caRoot/certs/${caName}.crt.pem
+
+	mkdir -p $caRoot/certs
+
+	openssl req \
+		-config $caRoot/openssl.${caName}.cnf \
+		-key $caRoot/private/${caName}.key.pem \
+		-passin file:$caRoot/private/${caName}.passphrase \
+		-new -x509 -days 7300 -sha256 \
+		-extensions v3_ca \
+		-out $caRoot/certs/${caName}.crt.pem
+}
+
+# create CA folder structure
+# usage: createIntermediateFolderAndConfig <ca folder> <ca name>
+createIntermediateFolderAndConfig() {
+	local caRoot="$1"
+	local caName=`deriveName $caRoot`
+
+	blatMaybe $caRoot
+
+	mkdir -p $caRoot
+
+	cat > $caRoot/openssl.${caName}.cnf <<EOF
+[ ca ]
+default_ca = CA_default
+
+[ CA_default ]
+name              = $caName
+dir               = $caRoot
+certs             = \$dir/certs
+crl_dir           = \$dir/crl
+new_certs_dir     = \$dir/newcerts
+database          = \$dir/index.txt
+serial            = \$dir/serial
+RANDFILE          = \$dir/private/.rand
+
+private_key       = \$dir/private/\$name.key.pem
+certificate       = \$dir/certs/\$name.cert.pem
+
+crlnumber         = \$dir/crlnumber
+crl               = \$dir/crl/\$name.crl.pem
+crl_extensions    = crl_ext
+default_crl_days  = 30
+
+default_md        = sha256
+
+name_opt          = ca_default
+cert_opt          = ca_default
+default_days      = 365
+preserve          = no
+policy            = policy_intermediate
+unique_subject	= no
+
+# root CA policy
+[ policy_root ]
+countryName	= match
+stateOrProvinceName = match
+organizationName = match
+organizationalUnitName = match
+commonName = supplied
+emailAddress = optional
+
+# intermediate CA policy
+[ policy_intermediate ]
+countryName	= match
+stateOrProvinceName = match
+organizationName = match
+organizationalUnitName = match
+commonName = supplied
+emailAddress = optional
+
+[ req ]
+default_bits        = 2048
+distinguished_name  = req_distinguished_name
+string_mask         = utf8only
+
+default_md          = sha256
+x509_extensions     = v3_ca
+
+[ req_distinguished_name ]
+countryName                     = Country Name (2 letter code)
+stateOrProvinceName             = State or Province Name
+localityName                    = Locality Name
+0.organizationName              = Organization Name
+organizationalUnitName          = Organizational Unit Name
+commonName                      = Common Name
+emailAddress                    = Email Address
+
+countryName_default             = GB
+stateOrProvinceName_default     = England
+
+[ v3_ca ]
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid:always,issuer
+basicConstraints = critical, CA:true
+keyUsage = critical, digitalSignature, cRLSign, keyCertSign
+
+[ v3_intermediate_ca ]
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid:always,issuer
+basicConstraints = critical, CA:true, pathlen:0
+keyUsage = critical, digitalSignature, cRLSign, keyCertSign
+
+[ usr_cert ]
+basicConstraints = CA:FALSE
+nsCertType = client, email
+nsComment = "OpenSSL Generated Client Certificate"
+
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid,issuer
+keyUsage = critical, nonRepudiation, digitalSignature, keyEncipherment
+extendedKeyUsage = clientAuth, emailProtection
+
+[ server_cert ]
+basicConstraints = CA:FALSE
+nsCertType = server
+nsComment = "OpenSSL Generated Server Certificate"
+
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid,issuer:always
+keyUsage = critical, digitalSignature, keyEncipherment
+extendedKeyUsage = serverAuth
+
+[ crl_ext ]
+authorityKeyIdentifier=keyid:always
+
+[ ocsp ]
+basicConstraints = CA:FALSE
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid,issuer
+keyUsage = critical, digitalSignature
+extendedKeyUsage = critical, OCSPSigning
+EOF
+}
+
+# create CA folder structure
+# usage: createIntermediateFolderAndConfig <ca folder> <ca name>
+createRootFolderAndConfig() {
+	local caRoot="$1"
+	local caName=`deriveName $caRoot`
+
+	blatMaybe $caRoot
+
+	mkdir -p $caRoot
+
+	cat > $caRoot/openssl.${caName}.cnf <<EOF
+# OpenSSL root CA configuration file.
+
+[ ca ]
+# 'man ca'
+default_ca = CA_shepd
+
+[ CA_shepd ]
+# Directory and file locations.
+name              = $caName
+dir               = $caRoot
+certs             = \$dir/certs
+crl_dir           = \$dir/crl
+new_certs_dir     = \$dir/newcerts
+database          = \$dir/index.txt
+serial            = \$dir/serial
+RANDFILE          = \$dir/private/.rand
+
+# The root key and root certificate.
+private_key       = \$dir/private/\$name.key.pem
+certificate       = \$dir/certs/\$name.cert.pem
+
+# For certificate revocation lists.
+crlnumber         = \$dir/crlnumber
+crl               = \$dir/crl/\$name.crl.pem
+crl_extensions    = crl_ext
+default_crl_days  = 30
+
+# SHA-1 is deprecated, so use SHA-2 instead.
+default_md        = sha256
+
+name_opt          = ca_default
+cert_opt          = ca_default
+default_days      = 375
+preserve          = no
+policy            = policy_strict
+
+[ policy_strict ]
+# The root CA should only sign intermediate certificates that match.
+# See the POLICY FORMAT section of 'man ca'.
+countryName             = match
+stateOrProvinceName     = match
+organizationName        = match
+organizationalUnitName  = optional
+commonName              = supplied
+emailAddress            = optional
+
+[ policy_loose ]
+# Allow the intermediate CA to sign a more diverse range of certificates.
+# See the POLICY FORMAT section of the 'ca' man page.
+countryName             = optional
+stateOrProvinceName     = optional
+localityName            = optional
+organizationName        = optional
+organizationalUnitName  = optional
+commonName              = supplied
+emailAddress            = optional
+
+[ req ]
+# Options for the 'req' tool ('man req').
+default_bits        = 2048
+distinguished_name  = req_distinguished_name
+string_mask         = utf8only
+
+# SHA-1 is deprecated, so use SHA-2 instead.
+default_md          = sha256
+
+# Extension to add when the -x509 option is used.
+x509_extensions     = v3_ca
+
+[ req_distinguished_name ]
+# See <https://en.wikipedia.org/wiki/Certificate_signing_request>.
+countryName                     = Country Name (2 letter code)
+stateOrProvinceName             = State or Province Name
+localityName                    = Locality Name
+0.organizationName              = Organization Name
+organizationalUnitName          = Organizational Unit Name
+commonName                      = Common Name
+emailAddress                    = Email Address
+
+# Optionally, specify some defaults.
+countryName_default             = GB
+stateOrProvinceName_default     = England
+localityName_default            =
+0.organizationName_default      = Shepd Limited
+#organizationalUnitName_default  =
+#emailAddress_default            =
+
+[ v3_ca ]
+# Extensions for a typical CA ('man x509v3_config').
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid:always,issuer
+basicConstraints = critical, CA:true
+keyUsage = critical, digitalSignature, cRLSign, keyCertSign
+
+[ v3_intermediate_ca ]
+# Extensions for a typical intermediate CA ('man x509v3_config').
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid:always,issuer
+basicConstraints = critical, CA:true, pathlen:0
+keyUsage = critical, digitalSignature, cRLSign, keyCertSign
+
+[ usr_cert ]
+# Extensions for client certificates ('man x509v3_config').
+basicConstraints = CA:FALSE
+nsCertType = client, email
+nsComment = "OpenSSL Generated Client Certificate"
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid,issuer
+keyUsage = critical, nonRepudiation, digitalSignature, keyEncipherment
+extendedKeyUsage = clientAuth, emailProtection
+
+[ server_cert ]
+# Extensions for server certificates ('man x509v3_config').
+basicConstraints = CA:FALSE
+nsCertType = server
+nsComment = "OpenSSL Generated Server Certificate"
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid,issuer:always
+keyUsage = critical, digitalSignature, keyEncipherment
+extendedKeyUsage = serverAuth
+
+[ crl_ext ]
+# Extension for CRLs ('man x509v3_config').
+authorityKeyIdentifier=keyid:always
+
+[ ocsp ]
+# Extension for OCSP signing certificates ('man ocsp').
+basicConstraints = CA:FALSE
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid,issuer
+keyUsage = critical, digitalSignature
+extendedKeyUsage = critical, OCSPSigning
+EOF
+}
+
+# if $OVERWRITE is 1, and the given path then remove it. 
+# Otherwise die. usage: 
+# blatMaybe <path>
+blatMaybe() {
+	local path="$1"
+
+	[ ! -e "$path" ] && return # do nothing if the path does not exist
+	[ $OVERWRITE -eq 1 ] || die "$path exists; specify --overwrite to ignore"
+
+	rm -rf "$path"
+}
+
+# create a CSR for an intermediate CA cert (beneath the root)
+# usage: createIntermediateCsr <CA root> <CA name> <root CA root> <root CA name>
+createIntermediateCsr() {
+	local caRoot="$1"
+	local caName=`deriveName $caRoot`
+	local rootCaRoot="$2"
+	local rootCaName=`deriveName $rootCaRoot`
+
+	[ -d $rootCaRoot ] || die "not a directory: $rootCaRoot"
+	[ -d $caRoot ] || die "not a directory: $caRoot"
+
+	blatMaybe $caRoot/csr/${caName}.csr.pem
+
+	mkdir -p $caRoot/csr
+	openssl req \
+		-config $caRoot/openssl.${caName}.cnf \
+		-key $caRoot/private/${caName}.key.pem \
+		-passin file:$caRoot/private/${caName}.passphrase \
+		-new -sha256 -out $caRoot/csr/${caName}.csr.pem
+}
+
+signIntermediateCsr() {
+	local caRoot="$1"
+	local caName=`deriveName $caRoot`
+	local rootCaRoot="$2"
+	local rootCaName=`deriveName $rootCaRoot`
+
+	[ -d $rootCaRoot ] || die "not a directory: $rootCaRoot"
+	[ -d $caRoot ] || die "not a directory: $caRoot"
+
+	blatMaybe $caRoot/certs/${caName}.crt.pem
+
+	mkdir -p $caRoot/certs
+	openssl x509 -req -days 3650 \
+		-in $caRoot/csr/${caName}.csr.pem \
+		-CA $rootCaRoot/certs/${rootCaName}.crt.pem \
+		-CAkey $rootCaRoot/private/${rootCaName}.key.pem \
+		-passin file:$rootCaRoot/private/${rootCaRoot}.passphrase \
+		-out $caRoot/certs/${caName}.crt.pem \
+		-extfile $rootCaRoot/openssl.${rootCaName}.cnf \
+		-extensions v3_intermediate_ca \
+		-set_serial 00 \
+		-sha256
+}
+
+verifyIntermediateCert() {
+	local caRoot="$1"
+	local caName=`deriveName $caRoot`
+	local rootCaRoot="$2"
+	local rootCaName=`deriveName $rootCaRoot`
+
+	[ -d $rootCaRoot ] || die "not a directory: $rootCaRoot"
+	[ -d $caRoot ] || die "not a directory: $caRoot"
+
+	openssl verify \
+		-CAfile $rootCaRoot/certs/${rootCaName}.crt.pem \
+		$caRoot/certs/${caName}.crt.pem
+}
+
+createIntermediateChain() {
+	local caRoot="$1"
+	local caName=`deriveName $caRoot`
+	local rootCaRoot="$2"
+	local rootCaName=`deriveName $rootCaRoot`
+
+	[ -d $rootCaRoot ] || die "not a directory: $rootCaRoot"
+	[ -d $caRoot ] || die "not a directory: $caRoot"
+
+	cat $caRoot/certs/${caName}.crt.pem \
+		$rootCaRoot/certs/${rootCaName}.crt.pem \
+		> $caRoot/certs/${caName}-chain.crt.pem
+}
+
+# create a CSR for a cert (beneath the intermediate)
+# usage: createCertificateCsr <cert name> <int CA root>
+createCertificateCsr() {
+	local certName="$1"
+	local caRoot="$2"
+	local caName=`deriveName $caRoot`
+
+	[ -d $caRoot ] || die "not a directory: $caRoot"
+
+	blatMaybe $caRoot/csr/${certName}.csr.pem
+
+	openssl req \
+		-config $caRoot/openssl.${caName}.cnf \
+		-key $caRoot/private/${certName}.key.pem \
+		-passin file:$caRoot/private/${certName}.passphrase \
+		-new -sha256 -out $caRoot/csr/${certName}.csr.pem
+}
+
+signCertificateCsr() {
+	local certName="$1"
+	local caRoot="$2"
+	local caName=`deriveName $caRoot`
+	local caType="$3"
+
+	case "$caType" in
+		user) caType="usr_cert" ;;
+		server) caType="server_cert" ;;
+		*) die "--certificate-type must be 'user' or 'server'"
+	esac
+
+	[ -d $caRoot ] || die "not a directory: $caRoot"
+
+	blatMaybe $caRoot/certs/${certName}.crt.pem
+
+	openssl x509 -req -days 375 \
+		-in $caRoot/csr/${certName}.csr.pem \
+		-CA $caRoot/certs/${caName}.crt.pem \
+		-CAkey $caRoot/private/${caName}.key.pem \
+		-passin file:$caRoot/private/${caName}.passphrase \
+		-out $caRoot/certs/${certName}.crt.pem \
+		-set_serial 00 \
+		-extfile $caRoot/openssl.${caName}.cnf \
+		-extensions $caType \
+		-sha256
+}
+
+verifyCertificate() {
+	local certName="$1"
+	local caRoot="$2"
+	local caName=`deriveName $caRoot`
+	local rootCaRoot="$3"
+	local rootCaName=`deriveName $rootCaRoot`
+
+	[ -d $rootCaRoot ] || die "not a directory: $rootCaRoot"
+	[ -d $caRoot ] || die "not a directory: $caRoot"
+
+	openssl verify \
+		-CAfile $caRoot/certs/${caName}-chain.crt.pem \
+		$caRoot/certs/${certName}.crt.pem
+}
+
+MODE=''				# will be r (create-root), i (create-intermediate), 
+					#   c (create-cert), or v (verify)
+OVERWRITE=0
+ROOT_PATH=''
+INTERMEDIATE_PATH=''
+CERT_NAME=''
+CERT_TYPE='server'
+
+# h - check for option -h without parameters; gives error on unsupported options;
+# h: - check for option -h with parameter; gives errors on unsupported options;
+# h:: - check for option -h with optional parameter; gives errors on unsupported options;
+# abc - check for options -a, -b, -c; gives errors on unsupported options;
+# :abc - check for options -a, -b, -c; silences errors on unsupported options;
+O=`getopt -n openssl-util \
+	-l create-root,create-intermediate,create-certificate,root-path:,intermediate-path:,certificate-name:,overwrite,certificate-type: -- \
+	cdp "$@"` || die "$usage"
+eval set -- "$O"
+while true; do
+    case "$1" in
+    --overwrite)			OVERWRITE=1; shift;;
+
+    --create-root)			MODE='r'; shift;;
+    --create-intermediate)	MODE='i'; shift;;
+    --create-certificate)	MODE='c'; shift;;
+
+    --root-path)			ROOT_PATH="$2"; shift 2;;
+    --intermediate-path)	INTERMEDIATE_PATH="$2"; shift 2;;
+    --certificate-name)		CERT_NAME="$2"; shift 2;;
+    --certificate-type)		CERT_TYPE="$2"; shift 2;;
+
+    --)			shift; break;;
+    *)			die "$usage";;
+    esac
+done
+
+case $MODE in
+	r)
+		[ -n "$ROOT_PATH" ] || die "must specify --root-path"
+
+		createRootFolderAndConfig $ROOT_PATH
+		createPrivateKey $ROOT_PATH 4096
+		createSelfSignedRootCert $ROOT_PATH
+		;;
+
+	i)
+		[ -n "$ROOT_PATH" ] || die "must specify --root-path"
+		[ -n "$INTERMEDIATE_PATH" ] || die "must specify --intermediate-path"
+		[ -d "$ROOT_PATH" ] || die "not a directory:: $ROOT_PATH"
+
+		createIntermediateFolderAndConfig $INTERMEDIATE_PATH
+		createPrivateKey $INTERMEDIATE_PATH 2048
+		createIntermediateCsr $INTERMEDIATE_PATH $ROOT_PATH
+		signIntermediateCsr $INTERMEDIATE_PATH $ROOT_PATH
+
+		verifyIntermediateCert $INTERMEDIATE_PATH $ROOT_PATH
+		createIntermediateChain $INTERMEDIATE_PATH $ROOT_PATH
+		;;
+
+	c)
+		[ -n "$ROOT_PATH" ] || die "must specify --root-path"
+		[ -n "$INTERMEDIATE_PATH" ] || die "must specify --intermediate-path"
+		[ -d "$ROOT_PATH" ] || die "not a directory: $ROOT_PATH"
+		[ -d "$INTERMEDIATE_PATH" ] || die "not a directory: $INTERMEDIATE_PATH"
+		[ -n "$CERT_NAME" ] || die "must specify --certificate-name"
+
+		createPrivateKey $INTERMEDIATE_PATH 2048 $CERT_NAME
+		createCertificateCsr $CERT_NAME $INTERMEDIATE_PATH
+		signCertificateCsr $CERT_NAME $INTERMEDIATE_PATH $CERT_TYPE
+		verifyCertificate $CERT_NAME $INTERMEDIATE_PATH $ROOT_PATH
+
+		;;
+
+	*)
+		die "you need to specify --create-root, --create-intermediate or --create-certificate"
+esac
