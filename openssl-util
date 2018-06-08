@@ -37,7 +37,7 @@
 # 				link to certificate)
 # --certificate-type		type of cert to create when --create-certificate is used;
 # 				can be either "user" or "server" (defaults to server)
-# --passphrases			type of passphrases to generate 
+#
 set -eu
 
 # Example usage: echo -e ${COL_GRAY}This is some text${COL_NONE}
@@ -64,7 +64,6 @@ die() {
 	exit 1
 }
 
-dn=`find-repo`
 usage="usage: openssl-util [--create-root|--create-intermediate|--create-certificate] --root-path --intermediate-path --certificate-type <user|server>"
 
 # generates a long passphrase from /dev/urandom

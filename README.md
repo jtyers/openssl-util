@@ -16,5 +16,4 @@ options:
 				link to certificate)
 --certificate-type		type of cert to create when --create-certificate is used;
 				can be either "user" or "server" (defaults to server)
---passphrases			type of passphrases to generate 
 ```
