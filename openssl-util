@@ -471,7 +471,7 @@ signIntermediateCsr() {
 		-in $caRoot/csr/${caName}.csr.pem \
 		-CA $rootCaRoot/certs/${rootCaName}.crt.pem \
 		-CAkey $rootCaRoot/private/${rootCaName}.key.pem \
-		-passin file:$rootCaRoot/private/${rootCaRoot}.passphrase \
+		-passin file:$rootCaRoot/private/${rootCaName}.passphrase \
 		-out $caRoot/certs/${caName}.crt.pem \
 		-extfile $rootCaRoot/openssl.${rootCaName}.cnf \
 		-extensions v3_intermediate_ca \
@@ -589,9 +589,21 @@ while true; do
     case "$1" in
     --overwrite)			OVERWRITE=1; shift;;
 
-    --create-root)			MODE='r'; shift;;
-    --create-intermediate)	MODE='i'; shift;;
-    --create-certificate)	MODE='c'; shift;;
+    --create-root)
+	    [ -n "$MODE" ] && die "cannot use multiple --create commands together"
+	    MODE='r'
+	    shift
+	    ;;
+    --create-intermediate)	
+	    [ -n "$MODE" ] && die "cannot use multiple --create commands together"
+	    MODE='i'
+	    shift
+	    ;;
+    --create-certificate)
+	    [ -n "$MODE" ] && die "cannot use multiple --create commands together"
+	    MODE='c'
+	    shift
+	    ;;
 
     --root-path)			ROOT_PATH="$2"; shift 2;;
     --intermediate-path)	INTERMEDIATE_PATH="$2"; shift 2;;
@@ -615,7 +627,7 @@ case $MODE in
 	i)
 		[ -n "$ROOT_PATH" ] || die "must specify --root-path"
 		[ -n "$INTERMEDIATE_PATH" ] || die "must specify --intermediate-path"
-		[ -d "$ROOT_PATH" ] || die "not a directory:: $ROOT_PATH"
+		[ -d "$ROOT_PATH" ] || die "not a directory: $ROOT_PATH"
 
 		createIntermediateFolderAndConfig $INTERMEDIATE_PATH
 		createPrivateKey $INTERMEDIATE_PATH 2048
