@@ -21,7 +21,10 @@
 # LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
+
 # 
+# Inspired by (and configs based on) the excellent OpenSSL CA tutorial by Jamie
+# Nguyen over at https://jamielinux.com/
 
 # openssl utility script
 #
@@ -64,7 +67,7 @@ die() {
 	exit 1
 }
 
-usage="usage: openssl-util [--create-root|--create-intermediate|--create-certificate] --root-path --intermediate-path --certificate-type <user|server>"
+usage="usage: openssl-util [--create-root|--create-intermediate|--create-certificate] --root-path --intermediate-path --certificate-type <user|server> --subject <subject>"
 
 # generates a long passphrase from /dev/urandom
 # usage: generatePassphrase <ca root> [<ca/cert name>]
@@ -144,13 +147,24 @@ createSelfSignedRootCert() {
 
 	mkdir -p $caRoot/certs
 
-	openssl req \
-		-config $caRoot/openssl.${caName}.cnf \
-		-key $caRoot/private/${caName}.key.pem \
-		-passin file:$caRoot/private/${caName}.passphrase \
-		-new -x509 -days 7300 -sha256 \
-		-extensions v3_ca \
-		-out $caRoot/certs/${caName}.crt.pem
+	if [ -z "$SUBJECT" ]; then
+		openssl req \
+			-config $caRoot/openssl.${caName}.cnf \
+			-key $caRoot/private/${caName}.key.pem \
+			-passin file:$caRoot/private/${caName}.passphrase \
+			-new -x509 -days 7300 -sha256 \
+			-extensions v3_ca \
+			-out $caRoot/certs/${caName}.crt.pem
+	else
+		openssl req \
+			-config $caRoot/openssl.${caName}.cnf \
+			-key $caRoot/private/${caName}.key.pem \
+			-passin file:$caRoot/private/${caName}.passphrase \
+			-new -x509 -days 7300 -sha256 \
+			-extensions v3_ca \
+			-subj "$SUBJECT" \
+			-out $caRoot/certs/${caName}.crt.pem
+	fi
 }
 
 # create CA folder structure
@@ -291,9 +305,9 @@ createRootFolderAndConfig() {
 
 [ ca ]
 # 'man ca'
-default_ca = CA_shepd
+default_ca = CA_issuer
 
-[ CA_shepd ]
+[ CA_issuer ]
 # Directory and file locations.
 name              = $caName
 dir               = $caRoot
@@ -370,7 +384,7 @@ emailAddress                    = Email Address
 countryName_default             = GB
 stateOrProvinceName_default     = England
 localityName_default            =
-0.organizationName_default      = Shepd Limited
+0.organizationName_default      = 
 #organizationalUnitName_default  =
 #emailAddress_default            =
 
@@ -448,11 +462,22 @@ createIntermediateCsr() {
 	blatMaybe $caRoot/csr/${caName}.csr.pem
 
 	mkdir -p $caRoot/csr
-	openssl req \
-		-config $caRoot/openssl.${caName}.cnf \
-		-key $caRoot/private/${caName}.key.pem \
-		-passin file:$caRoot/private/${caName}.passphrase \
-		-new -sha256 -out $caRoot/csr/${caName}.csr.pem
+
+	if [ -z "$SUBJECT" ]; then
+		openssl req \
+			-config $caRoot/openssl.${caName}.cnf \
+			-key $caRoot/private/${caName}.key.pem \
+			-passin file:$caRoot/private/${caName}.passphrase \
+			-new -sha256 -out $caRoot/csr/${caName}.csr.pem
+
+	else
+		openssl req \
+			-config $caRoot/openssl.${caName}.cnf \
+			-key $caRoot/private/${caName}.key.pem \
+			-passin file:$caRoot/private/${caName}.passphrase \
+			-subj "$SUBJECT" \
+			-new -sha256 -out $caRoot/csr/${caName}.csr.pem
+	fi
 }
 
 signIntermediateCsr() {
@@ -518,11 +543,21 @@ createCertificateCsr() {
 
 	blatMaybe $caRoot/csr/${certName}.csr.pem
 
-	openssl req \
-		-config $caRoot/openssl.${caName}.cnf \
-		-key $caRoot/private/${certName}.key.pem \
-		-passin file:$caRoot/private/${certName}.passphrase \
-		-new -sha256 -out $caRoot/csr/${certName}.csr.pem
+	if [ -z "$SUBJECT" ]; then
+		openssl req \
+			-config $caRoot/openssl.${caName}.cnf \
+			-key $caRoot/private/${certName}.key.pem \
+			-passin file:$caRoot/private/${certName}.passphrase \
+			-new -sha256 -out $caRoot/csr/${certName}.csr.pem
+	else
+		openssl req \
+			-config $caRoot/openssl.${caName}.cnf \
+			-key $caRoot/private/${certName}.key.pem \
+			-passin file:$caRoot/private/${certName}.passphrase \
+			-subj "$SUBJECT" \
+			-new -sha256 -out $caRoot/csr/${certName}.csr.pem
+
+	fi
 }
 
 signCertificateCsr() {
@@ -575,6 +610,7 @@ ROOT_PATH=''
 INTERMEDIATE_PATH=''
 CERT_NAME=''
 CERT_TYPE='server'
+SUBJECT=''
 
 # h - check for option -h without parameters; gives error on unsupported options;
 # h: - check for option -h with parameter; gives errors on unsupported options;
@@ -582,29 +618,30 @@ CERT_TYPE='server'
 # abc - check for options -a, -b, -c; gives errors on unsupported options;
 # :abc - check for options -a, -b, -c; silences errors on unsupported options;
 O=`getopt -n openssl-util \
-	-l create-root,create-intermediate,create-certificate,root-path:,intermediate-path:,certificate-name:,overwrite,certificate-type: -- \
-	cdp "$@"` || die "$usage"
+	-l subject:,create-root,create-intermediate,create-certificate,root-path:,intermediate-path:,certificate-name:,overwrite,certificate-type: -- \
+	ric "$@"` || die "$usage"
 eval set -- "$O"
 while true; do
     case "$1" in
     --overwrite)			OVERWRITE=1; shift;;
 
-    --create-root)
+    --create-root|-r)
 	    [ -n "$MODE" ] && die "cannot use multiple --create commands together"
 	    MODE='r'
 	    shift
 	    ;;
-    --create-intermediate)	
+    --create-intermediate|-i)	
 	    [ -n "$MODE" ] && die "cannot use multiple --create commands together"
 	    MODE='i'
 	    shift
 	    ;;
-    --create-certificate)
+    --create-certificate|-c)
 	    [ -n "$MODE" ] && die "cannot use multiple --create commands together"
 	    MODE='c'
 	    shift
 	    ;;
 
+    --subject)				SUBJECT="$2"; shift 2;;
     --root-path)			ROOT_PATH="$2"; shift 2;;
     --intermediate-path)	INTERMEDIATE_PATH="$2"; shift 2;;
     --certificate-name)		CERT_NAME="$2"; shift 2;;
